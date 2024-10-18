@@ -31,7 +31,7 @@ public class WordCountMapperReducer {
       }
 
       // * Tokenize words and punctuation
-      StringTokenizer itr = new StringTokenizer(line, " .,;?![]'\"", true);
+      StringTokenizer itr = new StringTokenizer(line, "@<>- .,;?![]{}'\"", true);
       while (itr.hasMoreTokens()) {
         String token = itr.nextToken();
         if (token.replaceAll("\\s+", "").isEmpty()) {
