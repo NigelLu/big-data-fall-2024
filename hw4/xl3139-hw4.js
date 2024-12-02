@@ -16,6 +16,24 @@ const WORLD_CITIES_TABLE = "worldcities";
 const db = new Mongo(`mongodb://${DB_USER}:${DB_PASSWORD}@mongo:27017/`).getDB(DB_NAME);
 // endregion: Preliminary
 
+// region: Q0
+/**
+ * I used MongoDB's utility command line tool called `mongoimport` to load all my data
+ * To load normal JSON data, I do `mongoimport --uri "mongodb://root:super_duper_password@localhost:27017/big_data_hw4?authSource=admin" --collection <collection_name> --file <file_path> --jsonArray`
+ * To load newline-delimited JSON data, I do `mongoimport --uri "mongodb://root:super_duper_password@localhost:27017/big_data_hw4?authSource=admin" --collection <collection_name> --file <file_path> --type=json`
+ * To load CSV data, I do `mongoimport --uri "mongodb://root:super_duper_password@localhost:27017/big_data_hw4?authSource=admin" --collection <collection_name> --type csv --headerline --file <file_path>`
+ * 
+ * Proof of data loaded:
+ * After running "show collections":
+ * big_data_hw4> show collections;
+ * durham_nc_foreclosure
+ * durham_restaurants
+ * meteorites
+ * restaurants
+ * worldcities
+ */
+// endregion: Q0
+
 // region: Q1
 const restaurantCollection = db[RESTAURANT_TABLE];
 
