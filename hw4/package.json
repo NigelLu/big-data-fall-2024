@@ -1,0 +1,15 @@
+{
+  "name": "hw4",
+  "version": "1.0.0",
+  "main": "xl3139-hw4-tojson.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "process": "node xl3139-hw4-tojson.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "mongodb": "^6.11.0"
+  }
+}
