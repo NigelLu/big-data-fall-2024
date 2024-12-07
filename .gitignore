@@ -32,3 +32,9 @@ replay_pid*
 
 # node_modules
 **/node_modules
+
+# data folder
+**/data/**
+
+# result folder
+**/result/**
