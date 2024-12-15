@@ -1,0 +1,1146 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "RsTgf5zHIm7Z"
+   },
+   "source": [
+    "# CS-GY 6513 Final Project - Book Recommendation"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "IU_TSNQVIm7b"
+   },
+   "source": [
+    "## Preliminary"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "id": "1VzFeekEIm7c"
+   },
+   "outputs": [],
+   "source": [
+    "\n",
+    "import torch\n",
+    "import pyspark.sql.functions as F\n",
+    "\n",
+    "from collections import Counter\n",
+    "from pyspark.ml import Pipeline\n",
+    "from pyspark.sql import SparkSession, DataFrame\n",
+    "from pyspark.ml.feature import Tokenizer, Word2Vec, StringIndexer\n",
+    "from pyspark.sql.types import ArrayType, FloatType, StringType, StructType, StructField, DateType"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "tKCOCLcqIm7d"
+   },
+   "source": [
+    "### Constants"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "id": "5B1CzT5kIm7d"
+   },
+   "outputs": [],
+   "source": [
+    "APP_NAME = \"BooksDataWordEmbedding\"\n",
+    "BOOKS_DATA_FILE_PATH = \"./data/books_data.csv\"\n",
+    "BOOK_RATING_FILE_PATH = \"./data/Books_rating.csv\"\n",
+    "COLUMNS_TO_EMBED = [\"Title\", \"description\", \"authors\"]\n",
+    "TOKENS_COLUMN_SUFFIX = \"_tokens\"\n",
+    "EMBEDDING_COLUMN_SUFFIX = \"_embeddings\"\n",
+    "\n",
+    "RAW_DATA_SCHEMA = StructType(\n",
+    "    [\n",
+    "        StructField(\"Title\", StringType(), False),\n",
+    "        StructField(\"description\", StringType(), True),\n",
+    "        StructField(\"authors\", StringType(), True),\n",
+    "        StructField(\n",
+    "            \"image\",\n",
+    "            StringType(),\n",
+    "            True,\n",
+    "        ),\n",
+    "        StructField(\"previewLink\", StringType(), True),\n",
+    "        StructField(\"publisher\", StringType(), True),\n",
+    "        StructField(\"publishedDate\", DateType(), True),\n",
+    "        StructField(\"infoLink\", StringType(), True),\n",
+    "        StructField(\"categories\", StringType(), True),\n",
+    "        StructField(\"ratingsCount\", FloatType(), True),\n",
+    "    ]\n",
+    ")\n",
+    "RAW_DATA_COLUMNS_TO_DROP = [\"image\", \"previewLink\", \"publishedDate\", \"infoLink\", \"ratingsCount\"]\n",
+    "RAW_DATA_STRING_ARRAY_FIELDS = [\"authors\", \"categories\"]\n",
+    "\n",
+    "COLUMNS_TO_USE_FOR_CATEGORY_FILLING = {\n",
+    "    \"Title_embeddings\": 1,\n",
+    "    \"description_embeddings\": 0.5,\n",
+    "}"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "36Rc_GVVIm7e"
+   },
+   "source": [
+    "### Useful Methods"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "id": "okIBKlh9Im7e"
+   },
+   "outputs": [],
+   "source": [
+    "def show_dataframe(\n",
+    "    dataframe: DataFrame, num_rows_to_show: int = 10, prefix: str = \"\", suffix: str = \"\"\n",
+    ") -> None:\n",
+    "    prefix = prefix + \":\\n\" if prefix else prefix\n",
+    "    suffix = suffix + \"\\n\" if suffix else suffix\n",
+    "    print(f\"------------\\n{prefix}\")\n",
+    "    dataframe.show(num_rows_to_show)\n",
+    "    print(f\"{suffix}------------\\n\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "pIYkJqKpIm7f"
+   },
+   "source": [
+    "### Spark Config"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "id": "lios4zi2Im7f"
+   },
+   "outputs": [],
+   "source": [
+    "spark = (\n",
+    "    SparkSession.builder.appName(APP_NAME)\n",
+    "    .config(\"spark.driver.extraJavaOptions\", \"-XX:ReservedCodeCacheSize=2048m\")\n",
+    "    .config(\"spark.executor.extraJavaOptions\", \"-XX:ReservedCodeCacheSize=2048m\")\n",
+    "    .config(\"spark.executor.memory\", \"16g\")\n",
+    "    .config(\"spark.driver.memory\", \"16g\")\n",
+    "    .getOrCreate()\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "wpoISNKxIm7f"
+   },
+   "source": [
+    "## Read Data & Null Handling"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "6uwOBNyBIm7g",
+    "outputId": "423103f1-86e6-4a44-ea8f-e72c0e21c33d"
+   },
+   "outputs": [],
+   "source": [
+    "data = spark.read.csv(BOOKS_DATA_FILE_PATH, header=True, schema=RAW_DATA_SCHEMA)\n",
+    "for column in COLUMNS_TO_EMBED:\n",
+    "    data = data.withColumn(column, F.when(F.col(column).isNull(), \"N/A\").otherwise(F.col(column)))\n",
+    "\n",
+    "for column in RAW_DATA_STRING_ARRAY_FIELDS:\n",
+    "    data = data.withColumn(\n",
+    "        column, F.regexp_replace(F.regexp_replace(data[column], r\"[\\[\\]'\\s]\", \"\"), r\",\", \" \")\n",
+    "    )\n",
+    "\n",
+    "for column in RAW_DATA_COLUMNS_TO_DROP:\n",
+    "    data = data.drop(F.col(column))\n",
+    "\n",
+    "show_dataframe(data, prefix=\"Books Data\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "8sBrSsdVIm7h"
+   },
+   "source": [
+    "## Process Data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "9eSLJmtcIm7h",
+    "outputId": "fb96a5f9-7b0b-4a44-b9cb-156dedee7455"
+   },
+   "outputs": [],
+   "source": [
+    "tokenizers = [\n",
+    "    Tokenizer(inputCol=column, outputCol=f\"{column}{TOKENS_COLUMN_SUFFIX}\")\n",
+    "    for column in COLUMNS_TO_EMBED\n",
+    "]\n",
+    "\n",
+    "word2Vecs = [\n",
+    "    Word2Vec(\n",
+    "        vectorSize=100,\n",
+    "        minCount=0,\n",
+    "        inputCol=f\"{column}{TOKENS_COLUMN_SUFFIX}\",\n",
+    "        outputCol=f\"{column}{EMBEDDING_COLUMN_SUFFIX}\",\n",
+    "    )\n",
+    "    for column in COLUMNS_TO_EMBED\n",
+    "]\n",
+    "\n",
+    "stages = tokenizers + word2Vecs\n",
+    "word_embedding_pipeline = Pipeline(stages=stages)\n",
+    "\n",
+    "model = word_embedding_pipeline.fit(data)\n",
+    "result = model.transform(data)\n",
+    "\n",
+    "show_dataframe(result, prefix=\"Word embedding result\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "Yr3St1GPIm7h"
+   },
+   "source": [
+    "### Save as JSON"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Drop Un-necessary Columns**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "gRgWyL7cIm7h",
+    "outputId": "bcbb6e3d-4a9f-44a8-cf11-1350c78bb106"
+   },
+   "outputs": [],
+   "source": [
+    "result.write.json(\"./result/books_data_embedding\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Missing Book Category Label Filling - Cosine Similarity"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Preparation"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Read in Data**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "rZ2kY3wNIm7i",
+    "outputId": "358e5e93-547e-4cb9-9172-ec00215c3f8b"
+   },
+   "outputs": [],
+   "source": [
+    "df = spark.read.json(\"./result/books_data_embedding/part*.json\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "show_dataframe(df)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Partition Rows based on if Categories Column is Missing**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "GKLDBTSlIm7i"
+   },
+   "outputs": [],
+   "source": [
+    "non_empty_df = df.filter(F.col(\"categories\").isNotNull())\n",
+    "empty_df = df.filter(F.col(\"categories\").isNull())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Extract the Embeddings**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "0NCmjyE7Im7i"
+   },
+   "outputs": [],
+   "source": [
+    "def extract_embeddings(embedding):\n",
+    "    if embedding and \"values\" in embedding:\n",
+    "        return embedding[\"values\"]\n",
+    "    return []\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "lH0qVzCcIm7i"
+   },
+   "outputs": [],
+   "source": [
+    "extract_embeddings_udf = F.udf(extract_embeddings, ArrayType(FloatType()))\n",
+    "\n",
+    "\n",
+    "for column in COLUMNS_TO_USE_FOR_CATEGORY_FILLING.keys():\n",
+    "    non_empty_df = non_empty_df.withColumn(column, extract_embeddings_udf(F.col(column)))\n",
+    "    empty_df = empty_df.withColumn(column, extract_embeddings_udf(F.col(column)))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "8BiiuDXwIm7i"
+   },
+   "source": [
+    "**Convert to Torch Tensor**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "oByZ4POJIm7i",
+    "outputId": "e04eea46-b1b2-456d-b601-72faadd94b25"
+   },
+   "outputs": [],
+   "source": [
+    "reference_data = non_empty_df.select(\n",
+    "    *list(COLUMNS_TO_USE_FOR_CATEGORY_FILLING.keys()), \"categories\"\n",
+    ").collect()\n",
+    "reference_embeddings = [\n",
+    "    torch.tensor([row[column] for row in reference_data], dtype=torch.float32)\n",
+    "    for column in COLUMNS_TO_USE_FOR_CATEGORY_FILLING.keys()\n",
+    "]\n",
+    "reference_categories = [row[\"categories\"] for row in reference_data]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "T_lRyf0JIm7j"
+   },
+   "source": [
+    "### Calculate Cosine Similarity and Fill the Empty Categories"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "px239ZZ_Im7j"
+   },
+   "outputs": [],
+   "source": [
+    "def predict_category(\n",
+    "    target_row, reference_embeddings, reference_categories, columns_weight_map: dict\n",
+    "):\n",
+    "    combined_similarities = None\n",
+    "    for column, weight in columns_weight_map.items():\n",
+    "        target_embedding = torch.tensor(target_row[column], dtype=torch.float32).unsqueeze(0)\n",
+    "        similarities = torch.nn.functional.cosine_similarity(\n",
+    "            target_embedding, reference_embeddings, dim=1\n",
+    "        )\n",
+    "\n",
+    "        if combined_similarities is None:\n",
+    "            combined_similarities = similarities * weight\n",
+    "        else:\n",
+    "            combined_similarities += similarities * weight\n",
+    "\n",
+    "    top_k_indices = torch.topk(combined_similarities, k=10).indices.numpy()\n",
+    "    top_categories = [reference_categories[i] for i in top_k_indices]\n",
+    "\n",
+    "    most_common_category = Counter(top_categories).most_common(1)[0][0]\n",
+    "    return most_common_category\n",
+    "\n",
+    "\n",
+    "predict_category_udf = F.udf(\n",
+    "    lambda x: predict_category(\n",
+    "        x, reference_embeddings, reference_categories, COLUMNS_TO_USE_FOR_CATEGORY_FILLING\n",
+    "    ),\n",
+    "    StringType(),\n",
+    ")\n",
+    "\n",
+    "\n",
+    "filled_empty_df = empty_df.withColumn(\n",
+    "    \"predicted_category\",\n",
+    "    predict_category_udf(F.struct(*COLUMNS_TO_USE_FOR_CATEGORY_FILLING.keys())),\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "SIY8houFIm7j"
+   },
+   "outputs": [],
+   "source": [
+    "updated_df = df.join(\n",
+    "    filled_empty_df.select(\"Title\", F.col(\"predicted_category\").alias(\"predicted_category\")),\n",
+    "    on=\"Title\",\n",
+    "    how=\"left_outer\"\n",
+    ").withColumn(\n",
+    "    \"categories\",\n",
+    "    F.when(F.col(\"predicted_category\").isNotNull(), F.col(\"predicted_category\"))\n",
+    "    .otherwise(F.col(\"categories\"))\n",
+    ").drop(\"predicted_category\")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "mljvl9FdIm7j",
+    "outputId": "c27dc260-8382-4cc0-da48-a964f9fd8f63"
+   },
+   "outputs": [],
+   "source": [
+    "empty_categories_count = updated_df.filter(F.col(\"categories\").isNull()).count()\n",
+    "\n",
+    "if empty_categories_count > 0:\n",
+    "    print(f\"There are {empty_categories_count} rows with empty categories.\")\n",
+    "else:\n",
+    "    print(\"All rows have non-empty categories.\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "ovblnteeIm7j",
+    "outputId": "b52e043b-eb7a-46fe-835e-bbf7d85513c0"
+   },
+   "outputs": [],
+   "source": [
+    "show_dataframe(updated_df, prefix=\"After filling categories\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "bYkLJJi9Im7k",
+    "outputId": "3a8baad8-06e6-45e8-fb0e-9f65a9bdc600"
+   },
+   "outputs": [],
+   "source": [
+    "output_path = \"./result/books_data_categories_filled\"\n",
+    "columns_to_drop = [\"Title_embeddings\", \"description_embeddings\", \"authors_embeddings\"]\n",
+    "cleaned_df = updated_df.drop(*columns_to_drop)\n",
+    "\n",
+    "\n",
+    "cleaned_df.write.option(\"header\", True).mode(\"overwrite\").json(output_path)\n",
+    "\n",
+    "print(f\"DataFrame has been written to {output_path} as JSON without specified columns.\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Read in the Data to Verify Output Result and for Later Use**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df_category_full = spark.read.json(\"./result/books_data_categories_filled/part*.json\").select(*[\"Title\", \"categories\"])\n",
+    "show_dataframe(df_category_full)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "jUfRJV2YIm7k"
+   },
+   "source": [
+    "# Collaborative Filtering"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "bp7P4BeVIm7k"
+   },
+   "source": [
+    "## Read Data and Sparse Handling"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "hpf1yW4JIm7k",
+    "outputId": "4007d618-5a5f-437b-cd17-a0c3953bd627"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "------------\n",
+      "Books Rating:\n",
+      "\n",
+      "+----------+--------------------+-----+--------------+--------------------+------------------+------------+-----------+--------------------+--------------------+\n",
+      "|        Id|               Title|Price|       User_id|         profileName|review/helpfulness|review/score|review/time|      review/summary|         review/text|\n",
+      "+----------+--------------------+-----+--------------+--------------------+------------------+------------+-----------+--------------------+--------------------+\n",
+      "|1882931173|Its Only Art If I...| NULL| AVCGYZL8FQQTD|\"Jim of Oz \"\"jim-...|               7/7|         4.0|  940636800|Nice collection o...|This is only for ...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A30TK6U7DNS82R|       Kevin Killian|             10/10|         5.0| 1095724800|   Really Enjoyed It|I don't care much...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A3UH4UZ4RSVO82|        John Granger|             10/11|         5.0| 1078790400|Essential for eve...|\"If people become...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A2MVUWT453QH61|\"Roy E. Perry \"\"a...|               7/7|         4.0| 1090713600|Phlip Nel gives s...|Theodore Seuss Ge...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A22X4XUPKF66MR|\"D. H. Richards \"...|               3/3|         4.0| 1107993600|Good academic ove...|\"Philip Nel - Dr....|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A2F6NONFUDB6UK|              Malvin|               2/2|         4.0| 1127174400|One of America's ...|\"\"\"Dr. Seuss: Ame...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A14OJS0VWMOSWO| Midwest Book Review|               3/4|         5.0| 1100131200|A memorably excel...|Theodor Seuss Gie...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A2RSSXTDZDUSH4|           J. Squire|               0/0|         5.0| 1231200000|Academia At It's ...|\"When I recieved ...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A25MD5I2GUIW6W|\"J. P. HIGBED \"\"b...|               0/0|         5.0| 1209859200|And to think that...|\"Trams (or any pu...|\n",
+      "|0826414346|Dr. Seuss: Americ...| NULL|A3VA4XFS5WNJO3|     Donald Burnside|               3/5|         4.0| 1076371200|Fascinating accou...|As far as I am aw...|\n",
+      "+----------+--------------------+-----+--------------+--------------------+------------------+------------+-----------+--------------------+--------------------+\n",
+      "only showing top 10 rows\n",
+      "\n",
+      "------------\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "data = spark.read.csv(BOOK_RATING_FILE_PATH, header=True, inferSchema=True)\n",
+    "\n",
+    "show_dataframe(data, prefix=\"Books Rating\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "k6MlFU0MIm7k",
+    "outputId": "e23e586b-9342-434b-ea40-3ab90d6b5489"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Original Data Size 3000000\n",
+      "Filtered Data Size 819551\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"Original Data Size\", data.count())\n",
+    "\n",
+    "count_df = data.groupBy(\"User_id\").agg(F.count(\"*\").alias(\"record_count\"))\n",
+    "# keep user with record number >= 10\n",
+    "filtered_df = count_df.filter(F.col(\"record_count\") >= 10)\n",
+    "data = data.join(filtered_df, on=\"User_id\", how=\"inner\")\n",
+    "\n",
+    "print(\"Filtered Data Size\", data.count())"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "ename": "NameError",
+     "evalue": "name 'df_category_full' is not defined",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[0;31mNameError\u001b[0m                                 Traceback (most recent call last)",
+      "Cell \u001b[0;32mIn[7], line 2\u001b[0m\n\u001b[1;32m      1\u001b[0m \u001b[38;5;66;03m# join with the books_data to get the book category\u001b[39;00m\n\u001b[0;32m----> 2\u001b[0m data \u001b[38;5;241m=\u001b[39m data\u001b[38;5;241m.\u001b[39mjoin(\u001b[43mdf_category_full\u001b[49m, on\u001b[38;5;241m=\u001b[39m\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mTitle\u001b[39m\u001b[38;5;124m\"\u001b[39m, how\u001b[38;5;241m=\u001b[39m\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124minner\u001b[39m\u001b[38;5;124m\"\u001b[39m)\n\u001b[1;32m      5\u001b[0m \u001b[38;5;28mprint\u001b[39m(\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mData Size after Adding Book Categories\u001b[39m\u001b[38;5;124m\"\u001b[39m, data\u001b[38;5;241m.\u001b[39mcount())\n",
+      "\u001b[0;31mNameError\u001b[0m: name 'df_category_full' is not defined"
+     ]
+    }
+   ],
+   "source": [
+    "# join with the books_data to get the book category\n",
+    "data = data.join(df_category_full, on=\"Title\", how=\"inner\")\n",
+    "\n",
+    "\n",
+    "print(\"Data Size after Adding Book Categories\", data.count())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "AtT5806eIm7l"
+   },
+   "source": [
+    "## Generate UserId and BookId"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "NxpAEKu_Im7l",
+    "outputId": "381b255f-206f-4ebf-e102-5d6451102475"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "------------\n",
+      "Books Rating:\n",
+      "\n",
+      "+--------------------+----------+--------------------+-----+---------------+------------------+------------+-----------+--------------------+--------------------+------------+------+------+------+\n",
+      "|             User_id|        Id|               Title|Price|    profileName|review/helpfulness|review/score|review/time|      review/summary|         review/text|record_count|UserId|BookId|rating|\n",
+      "+--------------------+----------+--------------------+-----+---------------+------------------+------------+-----------+--------------------+--------------------+------------+------+------+------+\n",
+      "|A00891092QIVH4W1Y...|0435126083|Wuthering Heights...| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    46|   2.0|\n",
+      "|A00891092QIVH4W1Y...|1593355548|   Wuthering Heights| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    45|   2.0|\n",
+      "|A00891092QIVH4W1Y...|0736605010|   Wuthering Heights| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    39|   2.0|\n",
+      "|A00891092QIVH4W1Y...|1591090245|   Wuthering Heights|12.99|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    43|   2.0|\n",
+      "|A00891092QIVH4W1Y...|0395051029|Wuthering Heights...| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    34|   2.0|\n",
+      "|A00891092QIVH4W1Y...|B0006AQ4LI|   Wuthering Heights| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    50|   2.0|\n",
+      "|A00891092QIVH4W1Y...|0134354575|   Wuthering Heights| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    32|   2.0|\n",
+      "|A00891092QIVH4W1Y...|0140860282|Wuthering Heights...| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    33|   2.0|\n",
+      "|A00891092QIVH4W1Y...|1569602093|  Wuthering Heights.| NULL|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    41|   2.0|\n",
+      "|A00891092QIVH4W1Y...|1593351348|   Wuthering Heights|18.96|Marjorie Snyder|               1/1|         2.0| 1353715200|I didn't care for...|I didn't care for...|          19|  9751|    44|   2.0|\n",
+      "+--------------------+----------+--------------------+-----+---------------+------------------+------------+-----------+--------------------+--------------------+------------+------+------+------+\n",
+      "only showing top 10 rows\n",
+      "\n",
+      "------------\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "user_indexer = StringIndexer(inputCol=\"User_id\", outputCol=\"UserId\")\n",
+    "data = user_indexer.fit(data).transform(data)\n",
+    "\n",
+    "book_indexer = StringIndexer(inputCol=\"Id\", outputCol=\"BookId\")\n",
+    "data = book_indexer.fit(data).transform(data)\n",
+    "\n",
+    "data = data \\\n",
+    "        .withColumn(\"UserId\", F.col(\"UserId\").cast(\"int\")) \\\n",
+    "        .withColumn(\"BookId\", F.col(\"BookId\").cast(\"int\")) \\\n",
+    "        .withColumn(\"rating\", F.col(\"review/score\").cast(\"float\"))\n",
+    "\n",
+    "# Remove nulls and NaNs\n",
+    "data = data.dropna(subset=[\"rating\"])\n",
+    "data = data.filter(F.col(\"rating\").isNotNull())\n",
+    "\n",
+    "show_dataframe(data, prefix=\"Books Rating\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "TfwmCDU7Im7l"
+   },
+   "source": [
+    "## Split training and test set"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "8UkdsEzIIm7l",
+    "outputId": "d0e1ad91-5fba-4611-a48f-04339d9097a7"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Training Data Size 647576\n",
+      "Test Data Size 162334\n"
+     ]
+    }
+   ],
+   "source": [
+    "(training, test) = data.randomSplit([0.8, 0.2], seed=42)\n",
+    "print(\"Training Data Size\", training.count())\n",
+    "print(\"Test Data Size\", test.count())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "q8xr_evfIm7l"
+   },
+   "source": [
+    "## Train"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {
+    "id": "l_QpH4APIm7l"
+   },
+   "outputs": [],
+   "source": [
+    "from pyspark.ml.recommendation import ALS\n",
+    "from pyspark.ml.evaluation import RegressionEvaluator"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "spark.sparkContext.setLogLevel(\"ERROR\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {
+    "id": "Y5CTe31RIm7m"
+   },
+   "outputs": [],
+   "source": [
+    "als = ALS(\n",
+    "    userCol=\"UserId\",          # Numeric User ID column\n",
+    "    itemCol=\"BookId\",          # Numeric Book ID column\n",
+    "    ratingCol=\"rating\",        # Rating column\n",
+    "    implicitPrefs=False,       # Explicit feedback (ratings)\n",
+    "    coldStartStrategy=\"drop\",  # Drop predictions with NaN\n",
+    "    rank=100,                  # since the dataset is sparse, start with higher latent vec dimensionality\n",
+    "    regParam=0.1,\n",
+    "    maxIter=10,\n",
+    ")\n",
+    "\n",
+    "model = als.fit(training)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "A8_6caj3Im7m",
+    "outputId": "8a4fa229-de0d-4d41-9161-00a84cf63df5"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Root Mean Squared Error (RMSE): 0.8265595613255382\n"
+     ]
+    }
+   ],
+   "source": [
+    "predictions = model.transform(test).withColumn(\n",
+    "    \"prediction\",\n",
+    "    F.when(F.col(\"prediction\") < 0, 0.0)\n",
+    "    .when(F.col(\"prediction\") > 5, 5.0)\n",
+    "    .otherwise(F.col(\"prediction\")),\n",
+    ")\n",
+    "evaluator = RegressionEvaluator(metricName=\"rmse\", labelCol=\"rating\", predictionCol=\"prediction\")\n",
+    "rmse = evaluator.evaluate(predictions)\n",
+    "print(f\"Root Mean Squared Error (RMSE): {rmse}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Hybrid with Category Filtering"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Find User's Top Book Categories"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "data = data.withColumn(\"category\", F.explode(F.split(data[\"categories\"], \" \")))\n",
+    "user_category_pref = data.groupBy(\"UserId\", \"category\").agg(F.avg(\"rating\").alias(\"avg_rating\"))\n",
+    "user_top_categories = user_category_pref.filter(user_category_pref[\"avg_rating\"] > 3)\n",
+    "user_top_categories_agg = user_top_categories.groupBy(\"UserId\").agg(F.collect_list(\"category\").alias(\"top_categories\"))\n",
+    "show_dataframe(user_top_categories_agg)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Generate the Recommendations and Filter based on User's Top Book Categories"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "vqbjvLAGIm7m",
+    "outputId": "fd807986-c9c4-49bd-a0e5-7ed10e2358d9"
+   },
+   "outputs": [],
+   "source": [
+    "user_recommendations = model.recommendForAllUsers(10)\n",
+    "exploded_user_recommendations = user_recommendations.withColumn(\n",
+    "    \"recommendation\", F.explode(F.col(\"recommendations\"))\n",
+    ")\n",
+    "exploded_user_recommendations = exploded_user_recommendations.select(\n",
+    "    F.col(\"UserId\"),\n",
+    "    F.col(\"recommendation.BookId\").alias(\"BookId\"),\n",
+    "    F.col(\"recommendation.rating\").alias(\"PredictedRating\"),\n",
+    ")\n",
+    "\n",
+    "book_categories = data.select(F.col(\"BookId\"), F.col(\"categories\")).withColumn(\n",
+    "    \"categories_array\", F.split(F.col(\"categories\"), \" \")\n",
+    ")\n",
+    "\n",
+    "recommendations_with_categories = exploded_user_recommendations.join(\n",
+    "    book_categories, on=\"BookId\", how=\"inner\"\n",
+    ")\n",
+    "\n",
+    "recommendations_hybrid = recommendations_with_categories.join(\n",
+    "    user_top_categories_agg, on=\"UserId\", how=\"inner\"\n",
+    ").filter(F.array_intersect(F.col(\"categories_array\"), F.col(\"top_categories\")).isNotNull())\n",
+    "\n",
+    "# re-group the recommendations\n",
+    "recommendations_hybrid = recommendations_hybrid.groupBy(\"UserId\").agg(\n",
+    "    F.collect_list(F.struct(\"BookId\", \"PredictedRating\")).alias(\"recommendations\")\n",
+    ")\n",
+    "\n",
+    "recommendations_hybrid.show(truncate=False)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Convert bookId/UserId to bookTitle/User_id"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "-Y9gb8wbIm7m",
+    "outputId": "5aa83129-0b5f-44b7-fdbd-4a8e5e1b8809"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+------+------+--------------------+\n",
+      "|UserId|BookId|               Title|\n",
+      "+------+------+--------------------+\n",
+      "|     1| 24306|The Forge (The Ra...|\n",
+      "|    22| 24621|Maximum Performan...|\n",
+      "|     3| 30660|Hal Leonard Guita...|\n",
+      "|    21| 51047|Messages from Wat...|\n",
+      "|     1| 62102|The Whole Enchila...|\n",
+      "|    10| 62102|The Whole Enchila...|\n",
+      "|    12| 77789|Testament: The Bi...|\n",
+      "|    22| 77789|Testament: The Bi...|\n",
+      "|     3| 77789|Testament: The Bi...|\n",
+      "|     4| 77789|Testament: The Bi...|\n",
+      "|     7| 77789|Testament: The Bi...|\n",
+      "|    21| 77789|Testament: The Bi...|\n",
+      "|     0| 77789|Testament: The Bi...|\n",
+      "|     2| 77789|Testament: The Bi...|\n",
+      "|    12| 91160|Car Crime (Crime ...|\n",
+      "|    22| 91160|Car Crime (Crime ...|\n",
+      "|     3| 91160|Car Crime (Crime ...|\n",
+      "|    21| 91160|Car Crime (Crime ...|\n",
+      "|     2| 91160|Car Crime (Crime ...|\n",
+      "|    12|101713|The Bishop method...|\n",
+      "+------+------+--------------------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "'\\njoined_df = joined_df.join(data, on=\"UserId\", how=\"left\").drop(data[\"Title\"]).select(\\n    F.col(\"UserId\"),\\n    F.col(\"Title\"),\\n)\\n\\njoined_df.show()\\n'"
+      ]
+     },
+     "execution_count": 23,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "exploded_user_recommendations = recommendations_hybrid.withColumn(\n",
+    "    \"recommendation\", F.explode(F.col(\"recommendations\"))\n",
+    ")\n",
+    "exploded_user_recommendations = exploded_user_recommendations.select(\n",
+    "    F.col(\"UserId\"),\n",
+    "    F.col(\"recommendation.BookId\").alias(\"BookId\"),\n",
+    "    F.col(\"recommendation.rating\").alias(\"PredictedRating\"),\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# map book id to title\n",
+    "book_id_to_title = data.select(F.col(\"BookId\"), F.col(\"Title\")).distinct()\n",
+    "\n",
+    "joined_df = exploded_user_recommendations.join(book_id_to_title, on=\"BookId\", how=\"left\").drop(data[\"UserId\"]).select(\n",
+    "    F.col(\"UserId\"),\n",
+    "    F.col(\"Title\"),\n",
+    ")\n",
+    "joined_df.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+--------------+--------------------+\n",
+      "|       User_id|               Title|\n",
+      "+--------------+--------------------+\n",
+      "|   AFVQZQ8PW0L|The Forge (The Ra...|\n",
+      "|A2VE83MZF98ITY|Maximum Performan...|\n",
+      "| AHD101501WCN1|Hal Leonard Guita...|\n",
+      "|A2L7N2U5Z316ZE|Messages from Wat...|\n",
+      "|   AFVQZQ8PW0L|The Whole Enchila...|\n",
+      "|A1L43KWWR05PCS|The Whole Enchila...|\n",
+      "|A2NJO6YE954DBH|Testament: The Bi...|\n",
+      "|A2VE83MZF98ITY|Testament: The Bi...|\n",
+      "| AHD101501WCN1|Testament: The Bi...|\n",
+      "|A1X8VZWTOG8IS6|Testament: The Bi...|\n",
+      "|A1S3C5OFU508P3|Testament: The Bi...|\n",
+      "|A2L7N2U5Z316ZE|Testament: The Bi...|\n",
+      "|A14OJS0VWMOSWO|Testament: The Bi...|\n",
+      "|A1D2C0WDCSHUWZ|Testament: The Bi...|\n",
+      "|A2NJO6YE954DBH|Car Crime (Crime ...|\n",
+      "|A2VE83MZF98ITY|Car Crime (Crime ...|\n",
+      "| AHD101501WCN1|Car Crime (Crime ...|\n",
+      "|A2L7N2U5Z316ZE|Car Crime (Crime ...|\n",
+      "|A1D2C0WDCSHUWZ|Car Crime (Crime ...|\n",
+      "|A2NJO6YE954DBH|The Bishop method...|\n",
+      "+--------------+--------------------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "# map UserId to User_id\n",
+    "userId_to_id = data.select(F.col(\"UserId\"), F.col(\"User_id\")).distinct()\n",
+    "\n",
+    "joined_df = joined_df.join(userId_to_id, on=\"UserId\", how=\"left\").select(\n",
+    "    F.col(\"User_id\"),\n",
+    "    F.col(\"Title\"),\n",
+    ")\n",
+    "\n",
+    "joined_df.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+--------------------+--------------------+\n",
+      "|             User_id|               books|\n",
+      "+--------------------+--------------------+\n",
+      "|A00891092QIVH4W1Y...|[Messages from Wa...|\n",
+      "|A01038432MVI9JXYT...|[Thompson Chain-R...|\n",
+      "|A0469729ADTHXTW0CPIS|[Hal Leonard Guit...|\n",
+      "|A0472291UIGF7A2DG8TB|[The Bishop metho...|\n",
+      "|A071300825Y5MYNM1...|[Messages from Wa...|\n",
+      "|A0919846H34XADJMF99R|[Instant Harmonic...|\n",
+      "|      A100NGGXRQF0AQ|[The Bishop metho...|\n",
+      "|      A101DG7P9E26PW|[The Bishop metho...|\n",
+      "|      A102P9UKBY9P75|[Penny Plain [Har...|\n",
+      "|      A102VPNZTRP1YA|[The Bishop metho...|\n",
+      "|      A103NNVQJUJTPM|[Messages from Wa...|\n",
+      "|      A1042BIXF6ZMAC|[Thompson Chain-R...|\n",
+      "|      A105L4AE1HAC4Y|[Instant Harmonic...|\n",
+      "|      A1065304SY1HF8|[Thompson Chain-R...|\n",
+      "|      A106RLZK9HQIFS|[Car Crime (Crime...|\n",
+      "|      A1072Q1O6YB3NY|[Messages from Wa...|\n",
+      "|      A1075MZNVRMSEO|[Guide to Spanish...|\n",
+      "|      A108D0GS1RXLNI|[Penny Plain [Har...|\n",
+      "|      A108LUEDZ6A5ZU|[Thompson Chain-R...|\n",
+      "|      A108XP24UESKSV|[Isabella And The...|\n",
+      "+--------------------+--------------------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "result_df = joined_df.groupBy(\"User_id\").agg(F.collect_list(\"Title\").alias(\"books\"))\n",
+    "result_df.show(truncate=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 30,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "+---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\n",
+      "|User_id              |books                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |\n",
+      "+---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\n",
+      "|A00891092QIVH4W1YP46A|[Messages from Water, Vol. 1, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, The Wounded Heart, The Forest of Doom, A Dad-Shaped Hole in My Heart, Hey Diddle Diddle, The Diary of Anne Frank., Transmetropolitan Vol. 5: Lonely City]                                                                                                                                                                                                                                                |\n",
+      "|A01038432MVI9JXYTTK5T|[Thompson Chain-Reference Bible (New International Version, Maroon Cover), Teacup Full of Roses, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The Forest of Doom, Sum & Substance: Corporations (The Outstanding Professor Series), The advance of science in the last half-century,, Hey Diddle Diddle]                                                                                                                                        |\n",
+      "|A0469729ADTHXTW0CPIS |[Hal Leonard Guitar Method, Complete Edition: Books & CD's 1, 2 and 3, Thompson Chain-Reference Bible (New International Version, Maroon Cover), Messages from Water, Vol. 1, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The Forest of Doom, Hey Diddle Diddle, A Treatise on Cosmic Fire]                                                                                                                                                    |\n",
+      "|A0472291UIGF7A2DG8TB |[The Bishop method of clothing construction, Thompson Chain-Reference Bible (New International Version, Maroon Cover), Teacup Full of Roses, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, Glencoe World History, Sum & Substance: Corporations (The Outstanding Professor Series), Hey Diddle Diddle]                                                                                                                                           |\n",
+      "|A071300825Y5MYNM1L3LX|[Messages from Water, Vol. 1, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, The Wounded Heart, The Forest of Doom, A Dad-Shaped Hole in My Heart, Hey Diddle Diddle, The Diary of Anne Frank., Transmetropolitan Vol. 5: Lonely City]                                                                                                                                                                                                                                                |\n",
+      "|A0919846H34XADJMF99R |[Instant Harmonica: Quick and Easy Instruction for the Beginner, Thompson Chain-Reference Bible (New International Version, Maroon Cover), Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The Forest of Doom, Sum & Substance: Corporations (The Outstanding Professor Series), The advance of science in the last half-century,, Hey Diddle Diddle]                                                                                              |\n",
+      "|A100NGGXRQF0AQ       |[The Bishop method of clothing construction, Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Remembering Satan: A Tragic Case of Recovered Memory, Alan King's Great Jewish Joke Book, The Good Old Days: The Holocaust as Seen by Its Perpetrators and Bystanders, A Writer at War: Vasily Grossman with the Red Army, 1941-1945, If This Is a Man and The Truce, A Treatise on Cosmic Fire, French in Action : A Beginning Course in Language and Culture, the Capretz Method: Part One]                                   |\n",
+      "|A101DG7P9E26PW       |[The Bishop method of clothing construction, Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The advance of science in the last half-century,, A treatise on cosmic fire, A treatise on cosmic fire, A Treatise on Cosmic Fire, Sociological Insight: An Introduction to Non-Obvious Sociology, French in Action : A Beginning Course in Language and Culture, the Capretz Method: Part One]                                                                                             |\n",
+      "|A102P9UKBY9P75       |[Penny Plain [Hardcover] by O. Douglas, Alan King's Great Jewish Joke Book, The Celestial Omnibus and Other Stories by E. M. Forster, Concise Amharic Dictionary: Amharic-English English-Amharic, Disasters and Accidents in Manned Spaceflight (Springer Praxis Books / Space Exploration), The Oxford History of the French Revolution, A treatise on cosmic fire, A treatise on cosmic fire, A Treatise on Cosmic Fire, Sociological Insight: An Introduction to Non-Obvious Sociology]                                                       |\n",
+      "|A102VPNZTRP1YA       |[The Bishop method of clothing construction, Penny Plain [Hardcover] by O. Douglas, The Whole Enchilada: A Spicy Collection of Sylvia's Best, Alan King's Great Jewish Joke Book, THE QUICKSILVER POOL, Blood Stain, After Life: Survival of the Soul, Dean's Watch, Tough Boris, French in Action : A Beginning Course in Language and Culture, the Capretz Method: Part One]                                                                                                                                                                    |\n",
+      "|A103NNVQJUJTPM       |[Messages from Water, Vol. 1, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, The Wounded Heart, The Forest of Doom, A Dad-Shaped Hole in My Heart, Hey Diddle Diddle, The Diary of Anne Frank., Transmetropolitan Vol. 5: Lonely City]                                                                                                                                                                                                                                                |\n",
+      "|A1042BIXF6ZMAC       |[Thompson Chain-Reference Bible (New International Version, Maroon Cover), Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Sum & Substance: Corporations (The Outstanding Professor Series), While They're at War: The True Story of American Families on the Homefront, Hey Diddle Diddle, Once on a Time, The Diary of Anne Frank., Stubborn Twig: Three Generations in the Life of a Japanese American Family]                                                                      |\n",
+      "|A105L4AE1HAC4Y       |[Instant Harmonica: Quick and Easy Instruction for the Beginner, Thompson Chain-Reference Bible (New International Version, Maroon Cover), Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The Forest of Doom, Sum & Substance: Corporations (The Outstanding Professor Series), The advance of science in the last half-century,, Hey Diddle Diddle]                                                                                              |\n",
+      "|A1065304SY1HF8       |[Thompson Chain-Reference Bible (New International Version, Maroon Cover), Messages from Water, Vol. 1, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The Forest of Doom, Autobiography of Benjamin Franklin; with Introductions and Notes, Hey Diddle Diddle, A Voice in the Wilderness: God's Presence in Your Desert Places]                                                                                                                  |\n",
+      "|A106RLZK9HQIFS       |[Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Alan King's Great Jewish Joke Book, The Forest of Doom, Concise Amharic Dictionary: Amharic-English English-Amharic, Hey Diddle Diddle, A treatise on cosmic fire, A Treatise on Cosmic Fire, Selected Writings of Sydney Smith]                                                                                                                                                                                                      |\n",
+      "|A1072Q1O6YB3NY       |[Messages from Water, Vol. 1, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, The Wounded Heart, The Forest of Doom, A Dad-Shaped Hole in My Heart, Hey Diddle Diddle, The Diary of Anne Frank., Transmetropolitan Vol. 5: Lonely City]                                                                                                                                                                                                                                                |\n",
+      "|A1075MZNVRMSEO       |[Guide to Spanish Suffixes (Language - Spanish), Cuba - La Noche de La Jinetera (Coleccion Cuadernos del bronce) (Spanish Edition), Penny Plain [Hardcover] by O. Douglas, Digalo Bien... Que Nada Le Cuesta: Repertorio de Errores Comunes en el Espanol de Puerto Rico, Vox Diccionario De Sinonimos Y Antonimos, NTC's Dictionary of Common Mistakes in Spanish, Guide to Spanish Idioms, NTC's Dictionary of Common Mistakes in Spanish, Bilingual Dictionary of Latin American Spanish, Nos Comunicamos (Spanish Edition)]                   |\n",
+      "|A108D0GS1RXLNI       |[Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, Drum Beats: Walt Whitman's Civil War Boy Lovers, Alan King's Great Jewish Joke Book, The advance of science in the last half-century,, Hey Diddle Diddle, A treatise on cosmic fire, The Body, Wildwood Wisdom, A Treatise on Cosmic Fire]                                                                                                                                                                                                                                  |\n",
+      "|A108LUEDZ6A5ZU       |[Thompson Chain-Reference Bible (New International Version, Maroon Cover), Teacup Full of Roses, Car Crime (Crime and Society Series), Penny Plain [Hardcover] by O. Douglas, Testament: The Bible Odyssey, The NEW AMERICAN DIET: More Than 250 All New Very Low Fat/ High Flavor Recipes from the Creators of the Bestselling New American Diet, Addy Surprise - Hc Book (American Girl), Sum & Substance: Corporations (The Outstanding Professor Series), Hey Diddle Diddle, A Field Guide to Reptiles and Amphibians in the Hawaiian Islands]|\n",
+      "|A108XP24UESKSV       |[Isabella And The English Witch (Signet Regency Romance), To Marry An Heiress (Zebra Regency Romance), A Viscount For Christmas (Zebra Regency Romance), The Gilded Knight (Zebra Regency Romance), AN Encounter With Venus (Signet Regency Romance), A Proper Mistress, Courting Trouble (Zebra Regency Romance), Emily's Beau (Signet Regency Romance), A Love Affair For Lizzie (Zebra Regency Romance), His Lordship's Holiday Surprise (Zebra Regency Romance)]                                                                              |\n",
+      "+---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\n",
+      "only showing top 20 rows\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "result_df.show(truncate=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "colab": {
+   "provenance": []
+  },
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.6"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

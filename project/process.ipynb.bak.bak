@@ -1,0 +1,306 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# CS-GY 6513 Final Project - Book Recommendation"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Preliminary"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pyspark.sql.functions as F\n",
+    "\n",
+    "from pyspark.ml import Pipeline\n",
+    "from pyspark.sql import SparkSession, DataFrame\n",
+    "from pyspark.ml.feature import Tokenizer, Word2Vec"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Constants"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "APP_NAME = \"BooksDataWordEmbedding\"\n",
+    "BOOKS_DATA_FILE_PATH = \"./data/books_data.csv\"\n",
+    "COLUMNS_TO_EMBED = [\"Title\", \"description\", \"authors\"]\n",
+    "TOKENS_COLUMN_SUFFIX = \"_tokens\"\n",
+    "EMBEDDING_COLUMN_SUFFIX = \"_embeddings\""
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Useful Methods"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def show_dataframe(\n",
+    "    dataframe: DataFrame, num_rows_to_show: int = 10, prefix: str = \"\", suffix: str = \"\"\n",
+    ") -> None:\n",
+    "    prefix = prefix + \":\\n\" if prefix else prefix\n",
+    "    suffix = suffix + \"\\n\" if suffix else suffix\n",
+    "    print(f\"------------\\n{prefix}\")\n",
+    "    dataframe.show(num_rows_to_show)\n",
+    "    print(f\"{suffix}------------\\n\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Spark Config"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "Setting default log level to \"WARN\".\n",
+      "To adjust logging level use sc.setLogLevel(newLevel). For SparkR, use setLogLevel(newLevel).\n",
+      "24/12/06 10:24:46 WARN NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable\n"
+     ]
+    }
+   ],
+   "source": [
+    "spark = (\n",
+    "    SparkSession.builder.appName(APP_NAME)\n",
+    "    .config(\"spark.driver.extraJavaOptions\", \"-XX:ReservedCodeCacheSize=1024m\")\n",
+    "    .config(\"spark.executor.extraJavaOptions\", \"-XX:ReservedCodeCacheSize=1024m\")\n",
+    "    .config(\"spark.executor.memory\", \"8g\")\n",
+    "    .config(\"spark.driver.memory\", \"8g\")\n",
+    "    .getOrCreate()\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Read Data & Null Handling"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "------------\n",
+      "Books Data:\n",
+      "\n",
+      "+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------+--------------------+--------------------+------------+\n",
+      "|               Title|         description|             authors|               image|         previewLink|           publisher| publishedDate|            infoLink|          categories|ratingsCount|\n",
+      "+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------+--------------------+--------------------+------------+\n",
+      "|Its Only Art If I...|             unknown|    ['Julie Strain']|http://books.goog...|http://books.goog...|                NULL|          1996|http://books.goog...|['Comics & Graphi...|        NULL|\n",
+      "|Dr. Seuss: Americ...|\"Philip Nel takes...| like that of Lew...| has changed lang...| giving us new wo...| inspiring artist...|['Philip Nel']|http://books.goog...|http://books.goog...|   A&C Black|\n",
+      "|Wonderful Worship...|This resource inc...|    ['David R. Ray']|http://books.goog...|http://books.goog...|                NULL|          2000|http://books.goog...|        ['Religion']|        NULL|\n",
+      "|Whispers of the W...|Julia Thomas find...| ['Veronica Haddon']|http://books.goog...|http://books.goog...|           iUniverse|       2005-02|http://books.goog...|         ['Fiction']|        NULL|\n",
+      "|Nation Dance: Rel...|             unknown|     ['Edward Long']|                NULL|http://books.goog...|                NULL|    2003-03-01|http://books.goog...|                NULL|        NULL|\n",
+      "|The Church of Chr...|In The Church of ...|['Everett Ferguson']|http://books.goog...|http://books.goog...|Wm. B. Eerdmans P...|          1996|http://books.goog...|        ['Religion']|         5.0|\n",
+      "|The Overbury affa...|             unknown|['Miriam Allen De...|                NULL|http://books.goog...|                NULL|          1960|http://books.goog...|                NULL|        NULL|\n",
+      "|A Walk in the Woo...|             unknown|    ['Lee Blessing']|                NULL|http://books.goog...|                NULL|          1988|http://books.goog...|                NULL|         3.0|\n",
+      "|Saint Hyacinth of...|The story for chi...|['Mary Fabyan Win...|http://books.goog...|http://books.goog...|     Tan Books & Pub|    2009-01-01|http://books.goog...|['Biography & Aut...|        NULL|\n",
+      "|Rising Sons and D...|Wardell recalls h...|  ['Steven Wardell']|                NULL|http://books.goog...|  Plympton PressIntl|          1995|http://books.goog...|  ['Social Science']|        NULL|\n",
+      "+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------+--------------------+--------------------+------------+\n",
+      "only showing top 10 rows\n",
+      "\n",
+      "------------\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "data = spark.read.csv(BOOKS_DATA_FILE_PATH, header=True, inferSchema=True)\n",
+    "for column in COLUMNS_TO_EMBED:\n",
+    "    data = data.withColumn(\n",
+    "        column, F.when(F.col(column).isNull(), \"unknown\").otherwise(F.col(column))\n",
+    "    )\n",
+    "\n",
+    "show_dataframe(data, prefix=\"Books Data\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Process Data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "Java HotSpot(TM) 64-Bit Server VM warning: CodeCache is full. Compiler has been disabled.\n",
+      "Java HotSpot(TM) 64-Bit Server VM warning: Try increasing the code cache size using -XX:ReservedCodeCacheSize=\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "CodeCache: size=1048576Kb used=32020Kb max_used=32046Kb free=1016556Kb\n",
+      " bounds [0x0000000127800000, 0x0000000129770000, 0x0000000167800000]\n",
+      " total_blobs=11292 nmethods=10308 adapters=896\n",
+      " compilation: disabled (not enough contiguous free space left)\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "24/12/06 10:24:55 WARN InstanceBuilder: Failed to load implementation from:dev.ludovic.netlib.blas.JNIBLAS\n",
+      "                                                                                \r"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "------------\n",
+      "Word embedding result:\n",
+      "\n",
+      "+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------+--------------------+--------------------+------------+--------------------+--------------------+--------------------+--------------------+----------------------+--------------------+\n",
+      "|               Title|         description|             authors|               image|         previewLink|           publisher| publishedDate|            infoLink|          categories|ratingsCount|        Title_tokens|  description_tokens|      authors_tokens|    Title_embeddings|description_embeddings|  authors_embeddings|\n",
+      "+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------+--------------------+--------------------+------------+--------------------+--------------------+--------------------+--------------------+----------------------+--------------------+\n",
+      "|Its Only Art If I...|             unknown|    ['Julie Strain']|http://books.goog...|http://books.goog...|                NULL|          1996|http://books.goog...|['Comics & Graphi...|        NULL|[its, only, art, ...|           [unknown]| [['julie, strain']]|[-0.0163606454318...|  [-0.0505810976028...|[0.07698649587109...|\n",
+      "|Dr. Seuss: Americ...|\"Philip Nel takes...| like that of Lew...| has changed lang...| giving us new wo...| inspiring artist...|['Philip Nel']|http://books.goog...|http://books.goog...|   A&C Black|[dr., seuss:, ame...|[\"philip, nel, ta...|[, like, that, of...|[0.05138066213112...|  [-0.0337325595427...|[0.06626177056589...|\n",
+      "|Wonderful Worship...|This resource inc...|    ['David R. Ray']|http://books.goog...|http://books.goog...|                NULL|          2000|http://books.goog...|        ['Religion']|        NULL|[wonderful, worsh...|[this, resource, ...|[['david, r., ray']]|[0.09187965355813...|  [-0.0393960681371...|[0.04126438684761...|\n",
+      "|Whispers of the W...|Julia Thomas find...| ['Veronica Haddon']|http://books.goog...|http://books.goog...|           iUniverse|       2005-02|http://books.goog...|         ['Fiction']|        NULL|[whispers, of, th...|[julia, thomas, f...|[['veronica, hadd...|[0.01995262317359...|  [0.00308923478102...|[0.01188304461538...|\n",
+      "|Nation Dance: Rel...|             unknown|     ['Edward Long']|                NULL|http://books.goog...|                NULL|    2003-03-01|http://books.goog...|                NULL|        NULL|[nation, dance:, ...|           [unknown]|  [['edward, long']]|[0.08230409463867...|  [-0.0505810976028...|[0.11582801910117...|\n",
+      "|The Church of Chr...|In The Church of ...|['Everett Ferguson']|http://books.goog...|http://books.goog...|Wm. B. Eerdmans P...|          1996|http://books.goog...|        ['Religion']|         5.0|[the, church, of,...|[in, the, church,...|[['everett, fergu...|[0.00842315289709...|  [-0.0157780082164...|[0.04716936638578...|\n",
+      "|The Overbury affa...|             unknown|['Miriam Allen De...|                NULL|http://books.goog...|                NULL|          1960|http://books.goog...|                NULL|        NULL|[the, overbury, a...|           [unknown]|[['miriam, allen,...|[0.01257629023166...|  [-0.0505810976028...|[0.02998425066471...|\n",
+      "|A Walk in the Woo...|             unknown|    ['Lee Blessing']|                NULL|http://books.goog...|                NULL|          1988|http://books.goog...|                NULL|         3.0|[a, walk, in, the...|           [unknown]| [['lee, blessing']]|[-0.0090706812217...|  [-0.0505810976028...|[0.08167543401941...|\n",
+      "|Saint Hyacinth of...|The story for chi...|['Mary Fabyan Win...|http://books.goog...|http://books.goog...|     Tan Books & Pub|    2009-01-01|http://books.goog...|['Biography & Aut...|        NULL|[saint, hyacinth,...|[the, story, for,...|[['mary, fabyan, ...|[0.00774311157874...|  [-0.0129024095315...|[0.10311445729166...|\n",
+      "|Rising Sons and D...|Wardell recalls h...|  ['Steven Wardell']|                NULL|http://books.goog...|  Plympton PressIntl|          1995|http://books.goog...|  ['Social Science']|        NULL|[rising, sons, an...|[wardell, recalls...|[['steven, wardel...|[0.07358926369084...|  [0.00446867685326...|[0.08726411825045...|\n",
+      "+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------+--------------------+--------------------+------------+--------------------+--------------------+--------------------+--------------------+----------------------+--------------------+\n",
+      "only showing top 10 rows\n",
+      "\n",
+      "------------\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "tokenizers = [\n",
+    "    Tokenizer(inputCol=column, outputCol=f\"{column}{TOKENS_COLUMN_SUFFIX}\")\n",
+    "    for column in COLUMNS_TO_EMBED\n",
+    "]\n",
+    "\n",
+    "word2Vecs = [\n",
+    "    Word2Vec(\n",
+    "        vectorSize=100,\n",
+    "        minCount=0,\n",
+    "        inputCol=f\"{column}{TOKENS_COLUMN_SUFFIX}\",\n",
+    "        outputCol=f\"{column}{EMBEDDING_COLUMN_SUFFIX}\",\n",
+    "    )\n",
+    "    for column in COLUMNS_TO_EMBED\n",
+    "]\n",
+    "\n",
+    "stages = tokenizers + word2Vecs\n",
+    "word_embedding_pipeline = Pipeline(stages=stages)\n",
+    "\n",
+    "model = word_embedding_pipeline.fit(data)\n",
+    "result = model.transform(data)\n",
+    "\n",
+    "show_dataframe(result, prefix=\"Word embedding result\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Save as JSON"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "                                                                                \r"
+     ]
+    }
+   ],
+   "source": [
+    "# # flatten the array-like columns to comma-separated strings\n",
+    "# # so that it can be saved as csv\n",
+    "# tokens_columns_to_concat = [f\"{column}{TOKENS_COLUMN_SUFFIX}\" for column in COLUMNS_TO_EMBED]\n",
+    "# embedding_columns_to_transform_and_concat = [\n",
+    "#     f\"{column}{EMBEDDING_COLUMN_SUFFIX}\" for column in COLUMNS_TO_EMBED\n",
+    "# ]\n",
+    "# for column in tokens_columns_to_concat:\n",
+    "#     result = result.withColumn(column, F.concat_ws(\",\", F.col(column)))\n",
+    "\n",
+    "# for column in embedding_columns_to_transform_and_concat:\n",
+    "#     result = result.withColumn(f\"{column}_values\", F.concat_ws(\",\", F.col(f\"{column}.values\")))\n",
+    "#     result.drop(column)\n",
+    "\n",
+    "result.write.json(\"./result/books_data_embedding\")"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "data",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
